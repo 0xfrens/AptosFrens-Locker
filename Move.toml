@@ -1,0 +1,9 @@
+[package]
+name = 'tokenlocker'
+version = '1.0.0'
+[dependencies.AptosFramework]
+git = 'https://github.com/aptos-labs/aptos-core.git'
+rev = 'main'
+subdir = 'aptos-move/framework/aptos-framework'
+[addresses]
+token_vesting = "0x523fdc336019440410e087aae6332ca1ce8ed927adb2c00f0c488bb71ab5b918"
