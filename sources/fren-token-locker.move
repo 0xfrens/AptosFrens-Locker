@@ -1,170 +1,174 @@
-module token_vesting::frens_LP_Locker {
-    use std::signer;    
+module FrensLocker::frens_locker {
+
+    use std::signer;
+    use std::error;
+    use std::string;
+
+    use aptos_std::event;
+
     use aptos_framework::account;
-    use std::vector;
-    use aptos_framework::managed_coin;
     use aptos_framework::coin;
-    use aptos_std::type_info;
-    use aptos_std::simple_map::{Self, SimpleMap};
+    use aptos_framework::timestamp; 
 
-// All the information required for Vesting
-    struct LP_Lock_Time has key,store
-    {
-        sender: address,  
-        receiver: address, 
-        coin_type:address,
-        release_times:vector<u64>,   //The times for unlocked
-        release_amounts:vector<u64>, //The corresponding amount for getting unlocked
-        total_amount:u64,            // Sum of all the release amount   
-        resource_cap: account::SignerCapability, // Signer
-        released_amount:u64,         //Sum of released amount
+    struct LockerTimed<phantom CoinType> has key {
+         locker_store: coin::Coin<CoinType>,
+         unlock_time: u64,
+     }
+
+    struct LockerState has key{
+        locker_live: bool,
+        locker_cap: account::SignerCapability,
+        deposit_fee: u64
     }
-    //Map to store seed and corresponding resource account address
-    struct LockCap  has key {
-        vestingMap: SimpleMap< vector<u8>,address>,
+
+    struct LockerEventHolder has key {
+        lock_events: event::EventHandle<LockerEvent>
     }
-    //errors
-    const ENO_INSUFFICIENT_FUND:u64=0;
-    const ENO_NO_VESTING:u64=1;
-    const ENO_SENDER_MISMATCH:u64=2;
-    const ENO_RECEIVER_MISMATCH:u64=3;
-    const ENO_WRONG_SENDER:u64=4;
-    const ENO_WRONG_RECEIVER:u64=5;
-    //Functions    
-    public entry fun create_lock<CoinType>(
-        account: &signer,
-        receiver: address,
-        release_amounts:vector<u64>,
-        release_times:vector<u64>,
-        total_amount:u64,
-        seeds: vector<u8>
-    )acquires LockCap {
-        let account_addr = signer::address_of(account);
-        let (vesting, vesting_cap) = account::create_resource_account(account, seeds); //resource account
-        let vesting_address = signer::address_of(&vesting);
-        if (!exists<LockCap>(account_addr)) {
-            move_to(account, LockCap { vestingMap: simple_map::create() })
-        };
-        let maps = borrow_global_mut<LockCap>(account_addr);
-        simple_map::add(&mut maps.vestingMap, seeds,vesting_address);
-        let vesting_signer_from_cap = account::create_signer_with_capability(&vesting_cap);
-        let length_of_schedule =  vector::length(&release_amounts);
-        let length_of_times = vector::length(&release_times);
-        assert!(length_of_schedule==length_of_times,ENO_INSUFFICIENT_FUND);
-        let i=0;
-        let total_amount_required=0;
-        while ( i < length_of_schedule )
-        {
-            let tmp = *vector::borrow(&release_amounts,i);
-            total_amount_required=total_amount_required+tmp;
-            i=i+1;
-        };
-        assert!(total_amount_required==total_amount,ENO_INSUFFICIENT_FUND);
-        let released_amount=0;
-        let coin_address = coin_address<CoinType>();
-        move_to(&vesting_signer_from_cap, LP_Lock_Time{
-        sender:account_addr,
-        receiver,
-        coin_type:coin_address, 
-        release_times,
-        release_amounts,
-        total_amount,
-        resource_cap:vesting_cap,
-        released_amount,
-        });
-        let escrow_addr = signer::address_of(&vesting);
-        managed_coin::register<CoinType>(&vesting_signer_from_cap); 
-        coin::transfer<CoinType>(account, escrow_addr, total_amount);
-    }
-     public entry fun release_lock<CoinType>(
-        receiver: &signer,
-        sender: address,
-        seeds: vector<u8>
-    )acquires LP_Lock_Time,LockCap{
-        let receiver_addr = signer::address_of(receiver);
-        assert!(exists<LockCap>(sender), ENO_NO_VESTING);
-        let maps = borrow_global<LockCap>(sender);
-        let vesting_address = *simple_map::borrow(&maps.vestingMap, &seeds);
-        assert!(exists<LP_Lock_Time>(vesting_address), ENO_NO_VESTING);  
-        let vesting_data = borrow_global<LP_Lock_Time>(vesting_address); 
-        let vesting_signer_from_cap = account::create_signer_with_capability(&vesting_data.resource_cap);
-        assert!(vesting_data.sender==sender,ENO_SENDER_MISMATCH);
-        assert!(vesting_data.receiver==receiver_addr,ENO_RECEIVER_MISMATCH);
-        let length_of_schedule =  vector::length(&vesting_data.release_amounts);
-        let i=0;
-        let amount_to_be_released=0;
-        let now = aptos_framework::timestamp::now_seconds();
-       // let now = 25;   //tested with this time as now_seconds doesn't work in test scripts
-        while (i < length_of_schedule)
-        {
-            let tmp_amount = *vector::borrow(&vesting_data.release_amounts,i);
-            let tmp_time = *vector::borrow(&vesting_data.release_times,i);
-            if (tmp_time>=now)
-            {
-                amount_to_be_released=amount_to_be_released+tmp_amount;
-            };
-            i=i+1;
-        };
-        amount_to_be_released=amount_to_be_released-vesting_data.released_amount;
-        if (!coin::is_account_registered<CoinType>(receiver_addr))
-        {managed_coin::register<CoinType>(receiver); 
-        };
-        coin::transfer<CoinType>(&vesting_signer_from_cap,receiver_addr,amount_to_be_released);
-    }
-     /// A helper function that returns the address of CoinType.
-    fun coin_address<CoinType>(): address {
-        let type_info = type_info::type_of<CoinType>();
-        type_info::account_address(&type_info)
-    }
-    #[test_only] 
-    struct MokshyaMoney { }
-    #[test(creator = @0xa11ce, receiver = @0xb0b, token_vesting = @token_vesting)]
-   fun test_vesting(
-        creator: signer,
-        receiver: signer,
-        token_vesting: signer
-    )acquires LP_Lock_Time,LockCap {
-       let sender_addr = signer::address_of(&creator);
-       let receiver_addr = signer::address_of(&receiver);
-        aptos_framework::account::create_account_for_test(sender_addr);
-        aptos_framework::account::create_account_for_test(receiver_addr);
-        aptos_framework::managed_coin::initialize<MokshyaMoney>(
-            &token_vesting,
-            b"Mokshya Money",
-            b"MOK",
-            10,
-            true
-        );
-    // let now  = aptos_framework::timestamp::now_seconds(); // doesn't work in test script
-       let release_amounts= vector<u64>[10,20,30];
-    //tested with below time as now_seconds doesn't work in test scripts
-       let release_times = vector<u64>[10,20,30];
-       let total_amount=60;
-       aptos_framework::managed_coin::register<MokshyaMoney>(&creator);
-       aptos_framework::managed_coin::mint<MokshyaMoney>(&token_vesting,sender_addr,100);    
-       create_lock<MokshyaMoney>(
-               &creator,
-               receiver_addr,
-               release_amounts,
-               release_times,
-               total_amount,
-               b"1bc");
+
+    struct LockerEvent has drop, store { 
+        new_locked_amount: u64,
+        coin_type: string::String,
+        coin_name: string::String,
+        decimals: u8,
+        locker_address: address,
+    } 
+
+    const ENOT_UNLOCKED: u64 = 1;
+    const ENOT_TIME_EXTENSION: u64 = 2;
+
+    const ENOT_ENOUGH_APTOS: u64 = 11;
+    const ENOT_ENOUGH_COINS: u64 = 12;
+
+    const OWNER_RESTRICTED: u64 = 21;
+    const ENOT_LOCKER_LIVE: u64 = 22;
+
+    const HARD_DEPOSIT_FEE_LIMIT: u64 = 500000000; // 5 APTOS
+
+    public entry fun depositLockTimed<CoinType>(newAccount: &signer, lockAmount: u64, unlock_time: u64) acquires LockerState, LockerTimed, LockerEventHolder {
+        let account_address = signer::address_of(newAccount);
+
+        let locker_state = borrow_global<LockerState>(@FrensLocker);
+        let locker_signer = account::create_signer_with_capability(&locker_state.locker_cap);
+        let locker_address = signer::address_of(&locker_signer);
+
+        let account_coin_balance = coin::balance<CoinType>(account_address);
+        let account_aptos_balance = coin::balance<aptos_framework::aptos_coin::AptosCoin>(account_address);
+        
         assert!(
-            coin::balance<MokshyaMoney>(sender_addr)==40,
-            ENO_WRONG_SENDER,
-        );    
-      release_lock<MokshyaMoney>(
-           &receiver,
-           sender_addr,
-            b"1bc"
-       );
-       //tested with now = 25 as it now_seconds doesn't work in test scripts
-       assert!(
-            coin::balance<MokshyaMoney>(receiver_addr)==30,
-            ENO_WRONG_RECEIVER,
+            account_coin_balance >= lockAmount,
+            error::permission_denied(ENOT_ENOUGH_COINS)
         );
-   } 
 
+        assert!(
+            account_aptos_balance >= locker_state.deposit_fee,
+            error::permission_denied(ENOT_ENOUGH_APTOS)
+        );
+
+        assert!(
+            (locker_state.locker_live == true || account_address == @FrensLocker),
+            error::permission_denied(ENOT_LOCKER_LIVE)
+        );
+        
+        let time_now = timestamp::now_seconds();
+        assert!(
+            unlock_time > time_now,
+            error::permission_denied(ENOT_TIME_EXTENSION),
+        );
+
+        if(!exists<LockerEventHolder>(locker_address)){
+            move_to(&locker_signer, LockerEventHolder{
+                lock_events: account::new_event_handle<LockerEvent>(&locker_signer),
+            });
+        };
+
+        aptos_framework::aptos_account::transfer(newAccount, @FrensLocker, locker_state.deposit_fee);
+        let coin_name = coin::name<CoinType>();
+        let decimals:u8 = coin::decimals<CoinType>();
+        let coin_type = aptos_std::type_info::type_name<CoinType>();
+        let tempHolder = borrow_global_mut<LockerEventHolder>(locker_address);
+        event::emit_event(&mut tempHolder.lock_events, LockerEvent{new_locked_amount: lockAmount, coin_type, coin_name, decimals, locker_address: account_address});    
+
+        let the_deposit = aptos_framework::coin::withdraw<CoinType>(newAccount, lockAmount);
+        if(exists<LockerTimed<CoinType>>(account_address)){
+            let tempHolder = borrow_global_mut<LockerTimed<CoinType>>(account_address);
+            coin::merge<CoinType>(&mut tempHolder.locker_store, the_deposit);
+        }
+        else{
+            move_to<LockerTimed<CoinType>>(newAccount, LockerTimed { locker_store: the_deposit, unlock_time: unlock_time}); 
+        };
+    }
+
+    public entry fun withdrawLockTimed<CoinType>(newAccount: &signer) acquires LockerTimed, LockerState, LockerEventHolder {
+        let account_addr = signer::address_of(newAccount);
+        let LockerTimed {  locker_store: the_depositz, unlock_time: _unlock_time} = move_from<LockerTimed<CoinType>>(account_addr); 
+        let time_now = timestamp::now_seconds();
+        assert!(
+            time_now > _unlock_time,
+            error::permission_denied(ENOT_UNLOCKED),
+        );
+        coin::deposit<CoinType>(account_addr, the_depositz);
+
+        let locker_state = borrow_global<LockerState>(@FrensLocker); 
+        let locker_signer = account::create_signer_with_capability(&locker_state.locker_cap);
+        let locker_address = signer::address_of(&locker_signer);
+
+        if(!exists<LockerEventHolder>(locker_address)){
+            move_to(&locker_signer, LockerEventHolder{
+                lock_events: account::new_event_handle<LockerEvent>(&locker_signer),
+            });
+        };
+        
+        let coin_name = coin::name<CoinType>();
+        let decimals: u8 = coin::decimals<CoinType>();
+        let coin_type = aptos_std::type_info::type_name<CoinType>();
+        let tempHolder = borrow_global_mut<LockerEventHolder>(locker_address);
+        event::emit_event(&mut tempHolder.lock_events, LockerEvent{new_locked_amount: 0, coin_type, coin_name, decimals, locker_address: account_addr});  
+    }
+
+    public entry fun extendLockTimed<CoinType>(newAccount: &signer, newUnlockTime: u64) acquires LockerTimed {
+        let account_addr = signer::address_of(newAccount);
+        let locker = borrow_global_mut<LockerTimed<CoinType>>(account_addr); 
+        assert!(
+            newUnlockTime > locker.unlock_time,
+            error::permission_denied(ENOT_TIME_EXTENSION),
+        );
+        locker.unlock_time = newUnlockTime;
+    }
+
+    //Disables new locks (withdraws/extensions/increases remain unchanged) 
+    // For ease of V2 migration
+    public entry fun toggleLockerState(deployerSigner: &signer) acquires LockerState{
+        let account_addr = signer::address_of(deployerSigner);
+        assert!(
+            account_addr == @FrensLocker,
+            error::permission_denied(OWNER_RESTRICTED),
+        );
+        let state = borrow_global_mut<LockerState>(account_addr);
+        if(state.locker_live == true){
+            state.locker_live = false;    
+        }
+        else{
+            state.locker_live = true;
+        }
+    }
+
+    public entry fun modifyDepositFee(deployerSigner: &signer, newDepositFee: u64) acquires LockerState {
+        let account_addr = signer::address_of(deployerSigner);
+        assert!(
+            account_addr == @FrensLocker,
+            error::permission_denied(OWNER_RESTRICTED),
+        );
+        assert!(
+            newDepositFee <= HARD_DEPOSIT_FEE_LIMIT,
+            error::permission_denied(OWNER_RESTRICTED),
+        );
+        let locker_state = borrow_global_mut<LockerState>(@FrensLocker); 
+        locker_state.deposit_fee = newDepositFee;
+    }
+
+    fun init_module(deployerSigner: &signer) {
+        let seeds = vector<u8>[11,11,11,11,11];
+        let (_locker_signer, locker_cap) = account::create_resource_account(deployerSigner, seeds); 
+        move_to(deployerSigner, LockerState{locker_live: true, locker_cap: locker_cap, deposit_fee: 500000000u64});
+    }
 }
-
-
